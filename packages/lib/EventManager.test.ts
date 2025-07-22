@@ -450,3 +450,288 @@ describe("EventManager CalDAV credential validation", () => {
     });
   });
 });
+
+describe("EventManager Daily video room expiration", () => {
+  let eventManager: EventManager;
+
+  beforeEach(() => {
+    eventManager = new EventManager({
+      user: {
+        id: 1,
+        email: "test@example.com",
+        username: "testuser",
+        name: "Test User",
+        credentials: [],
+        destinationCalendar: null,
+        allowDynamicBooking: false,
+        lockedDestinationCalendar: false,
+        profile: null,
+        hasTeamPlan: false,
+        organizationId: null,
+      },
+    });
+    vi.clearAllMocks();
+  });
+
+  describe("updateAllCalendarEvents with Daily video room", () => {
+    it("should recreate meeting when Daily video room is expired (14+ days)", async () => {
+      const fifteenDaysAgo = new Date();
+      fifteenDaysAgo.setDate(fifteenDaysAgo.getDate() - 15);
+
+      const mockBooking = {
+        id: 123,
+        uid: "booking-123",
+        title: "Test Meeting",
+        startTime: fifteenDaysAgo,
+        endTime: new Date(fifteenDaysAgo.getTime() + 60 * 60 * 1000), // 1 hour later
+        userId: 1,
+        attendees: [],
+        location: "integrations:daily",
+        references: [
+          {
+            id: 1,
+            type: "daily_video",
+            uid: "daily-room-123",
+            meetingId: "daily-room-123",
+            meetingPassword: null,
+            meetingUrl: "https://team.daily.co/daily-room-123",
+            bookingId: 123,
+            externalCalendarId: null,
+            deleted: null,
+            credentialId: null,
+            thirdPartyRecurringEventId: null,
+          },
+        ],
+      };
+
+      const mockEvent = {
+        type: "conference" as const,
+        id: 123,
+        uid: "booking-123",
+        title: "Test Meeting",
+        startTime: fifteenDaysAgo.toISOString(),
+        endTime: new Date(fifteenDaysAgo.getTime() + 60 * 60 * 1000).toISOString(),
+        attendees: [],
+        organizer: {
+          name: "Test User",
+          email: "test@example.com",
+          timeZone: "UTC",
+          language: { locale: "en" },
+        },
+        location: "integrations:daily",
+        conferenceData: {
+          createRequest: {
+            requestId: "req-123",
+          },
+        },
+        requiresConfirmation: false,
+        destinationCalendar: null,
+      };
+
+      // Mock the updateLocation method to simulate new room creation
+      const updateLocationSpy = vi.spyOn(eventManager as any, "updateLocation").mockResolvedValue({
+        results: [
+          {
+            type: "daily_video",
+            success: true,
+            uid: "new-daily-room-123",
+            createdEvent: {
+              id: "new-daily-room-123",
+              url: "https://team.daily.co/new-daily-room-123",
+            },
+          },
+        ],
+        referencesToCreate: [
+          {
+            type: "daily_video",
+            uid: "new-daily-room-123",
+            meetingId: "new-daily-room-123",
+            meetingUrl: "https://team.daily.co/new-daily-room-123",
+          },
+        ],
+      });
+
+      const result = await eventManager.updateAllCalendarEvents(mockEvent, mockBooking as any);
+
+      expect(updateLocationSpy).toHaveBeenCalled();
+      expect(result.results).toHaveLength(1);
+      expect(result.results[0].success).toBe(true);
+      expect(result.referencesToCreate).toHaveLength(1);
+      expect(result.referencesToCreate[0].meetingUrl).toContain("new-daily-room");
+    });
+
+    it("should not recreate meeting when Daily video room is not expired (< 14 days)", async () => {
+      const tenDaysAgo = new Date();
+      tenDaysAgo.setDate(tenDaysAgo.getDate() - 10);
+
+      const mockBooking = {
+        id: 123,
+        uid: "booking-123",
+        title: "Test Meeting",
+        startTime: tenDaysAgo,
+        endTime: new Date(tenDaysAgo.getTime() + 60 * 60 * 1000),
+        userId: 1,
+        attendees: [],
+        location: "integrations:daily",
+        references: [
+          {
+            id: 1,
+            type: "daily_video",
+            uid: "daily-room-123",
+            meetingId: "daily-room-123",
+            meetingPassword: null,
+            meetingUrl: "https://team.daily.co/daily-room-123",
+            bookingId: 123,
+            externalCalendarId: null,
+            deleted: null,
+            credentialId: null,
+            thirdPartyRecurringEventId: null,
+          },
+        ],
+      };
+
+      const mockEvent = {
+        type: "conference" as const,
+        id: 123,
+        uid: "booking-123",
+        title: "Test Meeting",
+        startTime: tenDaysAgo.toISOString(),
+        endTime: new Date(tenDaysAgo.getTime() + 60 * 60 * 1000).toISOString(),
+        attendees: [],
+        organizer: {
+          name: "Test User",
+          email: "test@example.com",
+          timeZone: "UTC",
+          language: { locale: "en" },
+        },
+        location: "integrations:daily",
+        conferenceData: {
+          createRequest: {
+            requestId: "req-123",
+          },
+        },
+        requiresConfirmation: false,
+        destinationCalendar: null,
+      };
+
+      const updateLocationSpy = vi.spyOn(eventManager as any, "updateLocation");
+
+      const result = await eventManager.updateAllCalendarEvents(mockEvent, mockBooking as any);
+
+      // Should not call updateLocation when room is not expired
+      expect(updateLocationSpy).not.toHaveBeenCalled();
+      expect(result.results).toHaveLength(0);
+      expect(result.referencesToCreate).toHaveLength(0);
+    });
+
+    it("should check expiration based on booking endTime, not startTime", async () => {
+      const thirteenDaysAgo = new Date();
+      thirteenDaysAgo.setDate(thirteenDaysAgo.getDate() - 13);
+
+      const mockBooking = {
+        id: 123,
+        uid: "booking-123",
+        title: "Test Meeting",
+        startTime: new Date(thirteenDaysAgo.getTime() - 60 * 60 * 1000), // 1 hour before endTime
+        endTime: thirteenDaysAgo, // Exactly 13 days ago - should not be expired (needs 14+)
+        userId: 1,
+        attendees: [],
+        location: "integrations:daily",
+        references: [
+          {
+            id: 1,
+            type: "daily_video",
+            uid: "daily-room-123",
+            meetingId: "daily-room-123",
+            meetingPassword: null,
+            meetingUrl: "https://team.daily.co/daily-room-123",
+            bookingId: 123,
+            externalCalendarId: null,
+            deleted: null,
+            credentialId: null,
+            thirdPartyRecurringEventId: null,
+          },
+        ],
+      };
+
+      const mockEvent = {
+        type: "conference" as const,
+        id: 123,
+        uid: "booking-123",
+        title: "Test Meeting",
+        startTime: new Date(thirteenDaysAgo.getTime() - 60 * 60 * 1000).toISOString(),
+        endTime: thirteenDaysAgo.toISOString(),
+        attendees: [],
+        organizer: {
+          name: "Test User",
+          email: "test@example.com",
+          timeZone: "UTC",
+          language: { locale: "en" },
+        },
+        location: "integrations:daily",
+        conferenceData: {
+          createRequest: {
+            requestId: "req-123",
+          },
+        },
+        requiresConfirmation: false,
+        destinationCalendar: null,
+      };
+
+      const updateLocationSpy = vi.spyOn(eventManager as any, "updateLocation");
+
+      await eventManager.updateAllCalendarEvents(mockEvent, mockBooking as any);
+
+      // Should not recreate as it's exactly 13 days, not 14+
+      expect(updateLocationSpy).not.toHaveBeenCalled();
+    });
+
+    it("should not check expiration for non-Daily video locations", async () => {
+      const fifteenDaysAgo = new Date();
+      fifteenDaysAgo.setDate(fifteenDaysAgo.getDate() - 15);
+
+      const mockBooking = {
+        id: 123,
+        uid: "booking-123",
+        title: "Test Meeting",
+        startTime: fifteenDaysAgo,
+        endTime: new Date(fifteenDaysAgo.getTime() + 60 * 60 * 1000),
+        userId: 1,
+        attendees: [],
+        location: "integrations:zoom", // Not Daily video
+        references: [],
+      };
+
+      const mockEvent = {
+        type: "conference" as const,
+        id: 123,
+        uid: "booking-123",
+        title: "Test Meeting",
+        startTime: fifteenDaysAgo.toISOString(),
+        endTime: new Date(fifteenDaysAgo.getTime() + 60 * 60 * 1000).toISOString(),
+        attendees: [],
+        organizer: {
+          name: "Test User",
+          email: "test@example.com",
+          timeZone: "UTC",
+          language: { locale: "en" },
+        },
+        location: "integrations:zoom",
+        conferenceData: {
+          createRequest: {
+            requestId: "req-123",
+          },
+        },
+        requiresConfirmation: false,
+        destinationCalendar: null,
+      };
+
+      const updateLocationSpy = vi.spyOn(eventManager as any, "updateLocation");
+
+      await eventManager.updateAllCalendarEvents(mockEvent, mockBooking as any);
+
+      // Should not check expiration for non-Daily locations
+      expect(updateLocationSpy).not.toHaveBeenCalled();
+    });
+  });
+});

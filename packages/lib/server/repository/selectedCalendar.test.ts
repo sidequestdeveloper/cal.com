@@ -439,4 +439,426 @@ describe("SelectedCalendarRepository", () => {
       });
     });
   });
+
+  describe("getNextBatchToWatch", () => {
+    beforeEach(async () => {
+      // Clean up
+      await prismock.selectedCalendar.deleteMany();
+      await prismock.user.deleteMany();
+      await prismock.team.deleteMany();
+      await prismock.membership.deleteMany();
+      await prismock.feature.deleteMany();
+    });
+
+    it("should return Google calendars for users with team calendar-cache feature", async () => {
+      // Create feature
+      const feature = await prismock.feature.create({
+        data: {
+          slug: "calendar-cache",
+          enabled: true,
+          description: "Calendar Cache",
+          type: "OPERATIONAL",
+        },
+      });
+
+      // Create team with calendar-cache feature
+      const team = await prismock.team.create({
+        data: {
+          name: "Test Team",
+          slug: "test-team",
+          features: {
+            create: {
+              featureId: feature.slug,
+            },
+          },
+        },
+      });
+
+      // Create user
+      const user = await prismock.user.create({
+        data: {
+          email: "test@example.com",
+          username: "testuser",
+        },
+      });
+
+      // Add user to team
+      await prismock.membership.create({
+        data: {
+          userId: user.id,
+          teamId: team.id,
+          role: "MEMBER",
+          accepted: true,
+        },
+      });
+
+      // Create Google calendar without subscription
+      await prismock.selectedCalendar.create({
+        data: {
+          userId: user.id,
+          integration: "google_calendar",
+          externalId: "google-cal-1",
+          credentialId: 1,
+        },
+      });
+
+      // Create Google calendar with expired subscription
+      const expiredDate = new Date(Date.now() - 1000).toISOString();
+      await prismock.selectedCalendar.create({
+        data: {
+          userId: user.id,
+          integration: "google_calendar",
+          externalId: "google-cal-2",
+          credentialId: 1,
+          googleChannelExpiration: expiredDate,
+        },
+      });
+
+      const result = await SelectedCalendarRepository.getNextBatchToWatch();
+
+      expect(result).toHaveLength(2);
+      expect(result.every((cal) => cal.integration === "google_calendar")).toBe(true);
+    });
+
+    it("should return Office365 calendars without team requirement", async () => {
+      const user = await prismock.user.create({
+        data: {
+          email: "test@example.com",
+          username: "testuser",
+        },
+      });
+
+      // Create Office365 calendar without subscription
+      await prismock.selectedCalendar.create({
+        data: {
+          userId: user.id,
+          integration: "office365_calendar",
+          externalId: "office365-cal-1",
+          credentialId: 1,
+        },
+      });
+
+      // Create Office365 calendar with expired subscription
+      const expiredDate = new Date(Date.now() - 1000);
+      await prismock.selectedCalendar.create({
+        data: {
+          userId: user.id,
+          integration: "office365_calendar",
+          externalId: "office365-cal-2",
+          credentialId: 1,
+          office365SubscriptionExpiration: expiredDate,
+        },
+      });
+
+      const result = await SelectedCalendarRepository.getNextBatchToWatch();
+
+      expect(result).toHaveLength(2);
+      expect(result.every((cal) => cal.integration === "office365_calendar")).toBe(true);
+    });
+
+    it("should not return calendars that have reached max watch attempts", async () => {
+      const user = await prismock.user.create({
+        data: {
+          email: "test@example.com",
+          username: "testuser",
+        },
+      });
+
+      // Create calendar with max attempts reached
+      await prismock.selectedCalendar.create({
+        data: {
+          userId: user.id,
+          integration: "office365_calendar",
+          externalId: "office365-cal-1",
+          credentialId: 1,
+          error: "Some error",
+          watchAttempts: 10, // Assuming maxAttempts is 10
+        },
+      });
+
+      const result = await SelectedCalendarRepository.getNextBatchToWatch();
+
+      expect(result).toHaveLength(0);
+    });
+  });
+
+  describe("getNextBatchToUnwatch", () => {
+    beforeEach(async () => {
+      await prismock.selectedCalendar.deleteMany();
+      await prismock.user.deleteMany();
+      await prismock.team.deleteMany();
+      await prismock.membership.deleteMany();
+      await prismock.feature.deleteMany();
+    });
+
+    it("should unwatch all calendars when global calendar-cache is disabled", async () => {
+      // Create feature but disable it
+      await prismock.feature.create({
+        data: {
+          slug: "calendar-cache",
+          enabled: false,
+          description: "Calendar Cache",
+          type: "OPERATIONAL",
+        },
+      });
+
+      const user = await prismock.user.create({
+        data: {
+          email: "test@example.com",
+          username: "testuser",
+        },
+      });
+
+      // Create Google calendar with active subscription
+      await prismock.selectedCalendar.create({
+        data: {
+          userId: user.id,
+          integration: "google_calendar",
+          externalId: "google-cal-1",
+          credentialId: 1,
+          googleChannelExpiration: new Date(Date.now() + 100000).toISOString(),
+        },
+      });
+
+      // Create Office365 calendar with active subscription
+      await prismock.selectedCalendar.create({
+        data: {
+          userId: user.id,
+          integration: "office365_calendar",
+          externalId: "office365-cal-1",
+          credentialId: 2,
+          office365SubscriptionExpiration: new Date(Date.now() + 100000),
+        },
+      });
+
+      const result = await SelectedCalendarRepository.getNextBatchToUnwatch();
+
+      expect(result).toHaveLength(2);
+      expect(result.some((cal) => cal.integration === "google_calendar")).toBe(true);
+      expect(result.some((cal) => cal.integration === "office365_calendar")).toBe(true);
+    });
+
+    it("should only unwatch Google calendars for teams without calendar-cache feature when global is enabled", async () => {
+      // Create feature and enable it
+      await prismock.feature.create({
+        data: {
+          slug: "calendar-cache",
+          enabled: true,
+          description: "Calendar Cache",
+          type: "OPERATIONAL",
+        },
+      });
+
+      // Create team WITHOUT calendar-cache feature
+      const team = await prismock.team.create({
+        data: {
+          name: "Test Team",
+          slug: "test-team",
+        },
+      });
+
+      const user = await prismock.user.create({
+        data: {
+          email: "test@example.com",
+          username: "testuser",
+        },
+      });
+
+      // Add user to team
+      await prismock.membership.create({
+        data: {
+          userId: user.id,
+          teamId: team.id,
+          role: "MEMBER",
+          accepted: true,
+        },
+      });
+
+      // Create Google calendar with active subscription
+      await prismock.selectedCalendar.create({
+        data: {
+          userId: user.id,
+          integration: "google_calendar",
+          externalId: "google-cal-1",
+          credentialId: 1,
+          googleChannelExpiration: new Date(Date.now() + 100000).toISOString(),
+        },
+      });
+
+      // Create Office365 calendar with active subscription (should NOT be unwatched)
+      await prismock.selectedCalendar.create({
+        data: {
+          userId: user.id,
+          integration: "office365_calendar",
+          externalId: "office365-cal-1",
+          credentialId: 2,
+          office365SubscriptionExpiration: new Date(Date.now() + 100000),
+        },
+      });
+
+      const result = await SelectedCalendarRepository.getNextBatchToUnwatch();
+
+      expect(result).toHaveLength(1);
+      expect(result[0].integration).toBe("google_calendar");
+    });
+
+    it("should not return calendars that have reached max unwatch attempts", async () => {
+      await prismock.feature.create({
+        data: {
+          slug: "calendar-cache",
+          enabled: false,
+          description: "Calendar Cache",
+          type: "OPERATIONAL",
+        },
+      });
+
+      const user = await prismock.user.create({
+        data: {
+          email: "test@example.com",
+          username: "testuser",
+        },
+      });
+
+      // Create calendar with max unwatch attempts reached
+      await prismock.selectedCalendar.create({
+        data: {
+          userId: user.id,
+          integration: "office365_calendar",
+          externalId: "office365-cal-1",
+          credentialId: 1,
+          office365SubscriptionExpiration: new Date(Date.now() + 100000),
+          error: "Some error",
+          unwatchAttempts: 10, // Assuming maxAttempts is 10
+        },
+      });
+
+      const result = await SelectedCalendarRepository.getNextBatchToUnwatch();
+
+      expect(result).toHaveLength(0);
+    });
+  });
+
+  describe("findFirstByOffice365SubscriptionId", () => {
+    it("should find calendar by Office365 subscription ID", async () => {
+      const user = await prismock.user.create({
+        data: {
+          email: "test@example.com",
+          username: "testuser",
+        },
+      });
+
+      const credential = await prismock.credential.create({
+        data: {
+          type: "office365_calendar",
+          userId: user.id,
+          key: {},
+          appId: "office365-calendar",
+        },
+      });
+
+      await prismock.selectedCalendar.create({
+        data: {
+          userId: user.id,
+          integration: "office365_calendar",
+          externalId: "office365-cal-1",
+          credentialId: credential.id,
+          office365SubscriptionId: "sub-123",
+        },
+      });
+
+      await prismock.selectedCalendar.create({
+        data: {
+          userId: user.id,
+          integration: "office365_calendar",
+          externalId: "office365-cal-2",
+          credentialId: credential.id,
+          office365SubscriptionId: "sub-456",
+        },
+      });
+
+      const result = await SelectedCalendarRepository.findFirstByOffice365SubscriptionId("sub-123");
+
+      expect(result).toBeTruthy();
+      expect(result?.credential).toBeTruthy();
+      expect(result?.credential?.id).toBe(credential.id);
+    });
+
+    it("should return null when subscription ID not found", async () => {
+      const result = await SelectedCalendarRepository.findFirstByOffice365SubscriptionId("non-existent");
+
+      expect(result).toBeNull();
+    });
+  });
+
+  describe("upsertManyForEventTypeIds", () => {
+    it("should upsert calendars for multiple event type IDs", async () => {
+      const user = await prismock.user.create({
+        data: {
+          email: "test@example.com",
+          username: "testuser",
+        },
+      });
+
+      const data = {
+        userId: user.id,
+        integration: "office365_calendar",
+        externalId: "office365-cal-1",
+        credentialId: 1,
+        office365SubscriptionId: "sub-123",
+      };
+
+      const eventTypeIds = [null, 1, 2];
+
+      const results = await SelectedCalendarRepository.upsertManyForEventTypeIds({
+        data,
+        eventTypeIds,
+      });
+
+      expect(results).toHaveLength(3);
+      expect(results[0].eventTypeId).toBeNull();
+      expect(results[1].eventTypeId).toBe(1);
+      expect(results[2].eventTypeId).toBe(2);
+      expect(results.every((r) => r.office365SubscriptionId === "sub-123")).toBe(true);
+    });
+
+    it("should update existing calendars when upserting", async () => {
+      const user = await prismock.user.create({
+        data: {
+          email: "test@example.com",
+          username: "testuser",
+        },
+      });
+
+      // Create existing calendar
+      await prismock.selectedCalendar.create({
+        data: {
+          userId: user.id,
+          integration: "office365_calendar",
+          externalId: "office365-cal-1",
+          credentialId: 1,
+          eventTypeId: 1,
+          office365SubscriptionId: "old-sub",
+        },
+      });
+
+      const data = {
+        userId: user.id,
+        integration: "office365_calendar",
+        externalId: "office365-cal-1",
+        credentialId: 1,
+        office365SubscriptionId: "new-sub",
+      };
+
+      const eventTypeIds = [1, 2];
+
+      const results = await SelectedCalendarRepository.upsertManyForEventTypeIds({
+        data,
+        eventTypeIds,
+      });
+
+      expect(results).toHaveLength(2);
+      expect(results[0].office365SubscriptionId).toBe("new-sub");
+      expect(results[1].office365SubscriptionId).toBe("new-sub");
+    });
+  });
 });
